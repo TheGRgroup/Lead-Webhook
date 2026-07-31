@@ -1,0 +1,13 @@
+{
+  "name": "gr-group-lead-webhook",
+  "version": "1.0.0",
+  "description": "Instant lead webhook receiver for GR Group — deploy this folder by itself.",
+  "type": "module",
+  "main": "lead_webhook_server.js",
+  "scripts": {
+    "start": "node lead_webhook_server.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
