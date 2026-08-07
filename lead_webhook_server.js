@@ -95,7 +95,19 @@ const SMS_OPTIN_URL = "https://consent-r7gu.onrender.com";
 // has a working MLS/city/zip/beds/baths search box, and because it's
 // BoldTrail's own IDX, browsing activity there gets captured back into
 // BoldTrail against the lead's record natively, no extra wiring needed.
-const HOME_SEARCH_URL = "https://gustavoruvalcaba.thegrgroup.net";
+//
+// UPDATED same day: Gus flagged that a bare homepage link doesn't match
+// what the ad promises ("New construction in Palm Desert & the Coachella
+// Valley") — a lead expecting Palm Desert homes shouldn't land on a
+// generic search box. Ran the site's own Palm Desert search live and
+// captured the resulting results-page URL (608 live results confirmed
+// 2026-08-07) rather than guessing a query-string format. Checked the
+// site's own filter panel for a "new construction" toggle — it only has
+// Home Type (Single Family/Condos/Multi-Family/Land/Townhouse) and listing
+// status (Active/Pending/Contingent/etc.), no construction-age filter, so
+// this is the closest real match: every active Palm Desert listing.
+const HOME_SEARCH_URL =
+  "https://gustavoruvalcaba.thegrgroup.net/index.php?advanced=1&area_keyword=Palm+Desert&beds=0&baths=0&min=0&max=100000000&rtype=map#rslt";
 
 // ADDED 2026-08-05 (Gus's "get this running right" request, after discovering
 // the Cowork-scheduled hot-lead-instant-alert task — the thing that used to
