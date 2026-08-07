@@ -104,10 +104,22 @@ const SMS_OPTIN_URL = "https://consent-r7gu.onrender.com";
 // 2026-08-07) rather than guessing a query-string format. Checked the
 // site's own filter panel for a "new construction" toggle — it only has
 // Home Type (Single Family/Condos/Multi-Family/Land/Townhouse) and listing
-// status (Active/Pending/Contingent/etc.), no construction-age filter, so
-// this is the closest real match: every active Palm Desert listing.
+// status (Active/Pending/Contingent/etc.), no construction-age filter — but
+// Gus correctly flagged that 608 results (nearly every listing in Palm
+// Desert, most of them resale) is spam, not the new-construction shortlist
+// the ad promises.
+//
+// UPDATED AGAIN same day: found a real proxy — a "Min Year Built" filter
+// under More Filters, confirmed working via its query param (yearbuilt=).
+// Set to 2025+ live and got 14 results (confirmed 2026-08-07), several
+// shown as builder elevation renderings/spec homes — i.e. the actual new
+// inventory the ad is about, not resale stock. Also tried a keywords=new
+// construction search first to see if remarks-text search would work
+// instead — it didn't filter at all (still returned all 607), so the
+// keyword field only matches location/MLS#/address, not remarks. Year
+// Built 2025+ is the closest honest filter this IDX template supports.
 const HOME_SEARCH_URL =
-  "https://gustavoruvalcaba.thegrgroup.net/index.php?advanced=1&area_keyword=Palm+Desert&beds=0&baths=0&min=0&max=100000000&rtype=map#rslt";
+  "https://gustavoruvalcaba.thegrgroup.net/index.php?advanced=1&display=Palm+Desert&min=0&max=100000000&beds=0&baths=0&minfootage=0&maxfootage=30000&minacres=0&maxacres=0&yearbuilt=2025&maxyearbuilt=0&walkscore=0&keywords=&areas%5B%5D=city%3Apalm+desert&sortby=listings.price+DESC&rtype=map";
 
 // ADDED 2026-08-05 (Gus's "get this running right" request, after discovering
 // the Cowork-scheduled hot-lead-instant-alert task — the thing that used to
