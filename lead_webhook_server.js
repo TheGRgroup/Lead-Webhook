@@ -86,6 +86,17 @@ const INSTANT_TOUCH_TAG = "instant-touch-sent";
 const READINESS_TAGS = { hot: "readiness-hot", warm: "readiness-warm", cold: "readiness-cold" };
 const SMS_OPTIN_URL = "https://consent-r7gu.onrender.com";
 
+// ADDED 2026-08-07 (Gus: "that also captures them on BT but it shows them
+// houses available in their area" — this was NOT already wired anywhere.
+// Checked every email template in this file and in server.js's full
+// sequence engine: none of them contained a link to Gus's own site. The
+// only link anywhere in the built system was the SMS opt-in link above.
+// This is his real BoldTrail-hosted IDX site (confirmed live 2026-08-07) —
+// has a working MLS/city/zip/beds/baths search box, and because it's
+// BoldTrail's own IDX, browsing activity there gets captured back into
+// BoldTrail against the lead's record natively, no extra wiring needed.
+const HOME_SEARCH_URL = "https://gustavoruvalcaba.thegrgroup.net";
+
 // ADDED 2026-08-05 (Gus's "get this running right" request, after discovering
 // the Cowork-scheduled hot-lead-instant-alert task — the thing that used to
 // text HIM "CALL NOW" — only runs while his Claude app is open, and had gone
@@ -104,12 +115,14 @@ const GUS_NOTIFY_ENABLED = process.env.GUS_NOTIFY_ENABLED !== "false";
 const TOUCH_ONE = {
   hot: {
     subject: "Let's get you into a new construction home",
-    sms: "Hi {{FIRST_NAME}}, this is Gus w/ GR Group — got your new construction inquiry. I can pull what's actually available + current builder incentives right now. Good time to talk today or tmrw? -Gus",
+    sms: "Hi {{FIRST_NAME}}, this is Gus w/ GR Group — got your new construction inquiry. Browse what's actually available now: {{HOME_SEARCH_URL}} — I can also pull current builder incentives. Good time to talk today or tmrw? -Gus",
     body: `Hi {{FIRST_NAME}},
 
 Thanks for reaching out about new construction in the Coachella Valley — sounds like you're ready to move soon, so I want to help you move fast.
 
-I can pull the communities and floor plans that are actually available right now (not just listed — available), plus whatever builder incentives are live this week. Fastest way to do this well is a short call.
+Take a look at what's actually available right now (not just listed — available): {{HOME_SEARCH_URL}}
+
+I can also pull whatever builder incentives are live this week. Fastest way to do this well is a short call.
 
 What's the best number and time to reach you today or tomorrow?
 
@@ -118,10 +131,12 @@ Gus`,
   },
   warm: {
     subject: "Good to connect — here's what happens next",
-    sms: "Hi {{FIRST_NAME}}, this is Gus w/ GR Group. Got your new construction inquiry — no rush, I'll send a few quick useful things over the next few weeks. Reply anytime w/ Qs. -Gus",
+    sms: "Hi {{FIRST_NAME}}, this is Gus w/ GR Group. Got your new construction inquiry — no rush. Feel free to browse what's out there: {{HOME_SEARCH_URL}} — I'll send a few useful things over the next few weeks. Reply anytime w/ Qs. -Gus",
     body: `Hi {{FIRST_NAME}},
 
 Thanks for your interest in new construction in the Coachella Valley. Sounds like you're planning ahead rather than needing something immediately — honestly the smart way to do this, since it gives you more time to find the right fit.
+
+Feel free to start browsing what's out there whenever you'd like: {{HOME_SEARCH_URL}}
 
 Over the next few weeks I'll send a few short, useful things: how the new-construction process actually works, current incentives, and what to look for before you sign anything. No pressure — reply anytime you have a question.
 
@@ -130,10 +145,12 @@ Gus`,
   },
   cold: {
     subject: "Got your info — no rush",
-    sms: "Hi {{FIRST_NAME}}, this is Gus w/ GR Group. Got your new construction inquiry — no rush at all, I'll check in occasionally w/ anything useful. Reply anytime. -Gus",
+    sms: "Hi {{FIRST_NAME}}, this is Gus w/ GR Group. Got your new construction inquiry — no rush at all. Whenever you're curious, browse what's out there: {{HOME_SEARCH_URL}} — I'll check in occasionally w/ anything useful. Reply anytime. -Gus",
     body: `Hi {{FIRST_NAME}},
 
 Thanks for checking out new construction homes. Sounds like you're still early in the process, which is completely fine — no rush at all, and no pressure from me.
+
+Whenever you're curious, feel free to browse what's out there: {{HOME_SEARCH_URL}}
 
 I'll check in every so often with something useful, and I'm always just a reply away if that changes.
 
@@ -148,7 +165,9 @@ function firstNameOf(fullName) {
 }
 
 function renderTemplate(str, firstName) {
-  return String(str).replace(/\{\{FIRST_NAME\}\}/g, firstName);
+  return String(str)
+    .replace(/\{\{FIRST_NAME\}\}/g, firstName)
+    .replace(/\{\{HOME_SEARCH_URL\}\}/g, HOME_SEARCH_URL);
 }
 
 async function ghlFetch(pathStr, options = {}) {
