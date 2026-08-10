@@ -319,13 +319,29 @@ function ghlReadinessValue(customFields) {
   return f ? String(f.value) : null;
 }
 
+// BUG FIX (2026-08-10): the field's two real answer options are
+// ["Yes", "I agree"] and ["No", "please don't contact me"] — the OLD check
+// below ("array non-empty = consent") was true for BOTH, so every lead who
+// explicitly answered "No, please don't contact me" was still marked
+// consent_on_file=true / phone_outreach_ok=true. Found live auditing real
+// leads through this exact webhook: Mary Gale and Armando Gonzalez Lugo
+// both answered "No" and both showed as consented. Explicit "no" now always
+// wins over any other signal in the array — same fix as server.js's
+// ghlConsentValue, duplicated here since this is a separate deployed
+// service with no shared module.
 function ghlConsentValue(customFields) {
   const f = (customFields || []).find((cf) => cf.id === GHL_CONSENT_FIELD_ID);
   if (!f) return false;
   const v = f.value;
-  if (Array.isArray(v)) return v.length > 0 && v.some((x) => String(x).trim());
+  const values = (Array.isArray(v) ? v : [v]).map((x) => String(x ?? "").trim().toLowerCase());
+  if (values.some((x) => x === "no" || x.includes("don't contact") || x.includes("do not contact"))) {
+    return false;
+  }
+  if (values.some((x) => x === "yes" || x.includes("i agree"))) {
+    return true;
+  }
   if (typeof v === "boolean") return v;
-  return Boolean(String(v ?? "").trim());
+  return values.some((x) => x.length > 0);
 }
 
 function leadTemperature(readiness) {
