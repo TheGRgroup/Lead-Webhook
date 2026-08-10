@@ -250,7 +250,7 @@ async function pushContactToBoldTrail(raw, name) {
     first_name: firstName || "Unknown",
     last_name: lastName,
     email: raw.email || undefined,
-    phone: raw.phone || undefined,
+    cell_phone_1: raw.phone || undefined,
     source: "GHL",
   };
   const data = await btFetch("/contact", { method: "POST", body: JSON.stringify(payload) });
