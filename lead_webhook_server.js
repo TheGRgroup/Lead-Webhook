@@ -258,6 +258,19 @@ async function pushContactToBoldTrail(raw, name) {
   return { pushed: true, boldtrail_contact_id: contactId };
 }
 
+// ADDED 2026-08-10 (Gus: "I don't see any follow up... going on" — he only
+// looks at BoldTrail, and nothing this service does ever wrote back to it).
+// PUT /contact/{id}/action/note with {title, details} — confirmed same
+// endpoint/shape as server.js's handleLogContactNote 2026-07-27. Best-effort:
+// caller wraps this in its own try/catch so a note-logging failure never
+// blocks the actual email send it's describing.
+async function logBoldTrailNote(boldtrailContactId, title, details) {
+  await btFetch(`/contact/${boldtrailContactId}/action/note`, {
+    method: "PUT",
+    body: JSON.stringify({ title, details }),
+  });
+}
+
 function ghlReadinessValue(customFields) {
   const f = (customFields || []).find((cf) => cf.id === GHL_READINESS_FIELD_ID);
   return f ? String(f.value) : null;
@@ -415,6 +428,24 @@ async function handleLeadWebhook(body) {
 
   const emailResult = await sendEmail(contactId, subject, html).catch((err) => ({ error: err.message }));
 
+  // Log the send back to BoldTrail so it's visible where Gus actually looks.
+  // Uses the id pushContactToBoldTrail already returned above — no extra
+  // lookup needed here (unlike server.js's sequence engine, which only has a
+  // GHL id and has to search BoldTrail by email to find this same id).
+  let boldtrailNoteLogged = false;
+  if (!emailResult?.error && boldtrailResult?.boldtrail_contact_id) {
+    try {
+      await logBoldTrailNote(
+        boldtrailResult.boldtrail_contact_id,
+        "Email Sent",
+        `Instant touch #1 sent: "${subject}" (${tier} tier, via GHL webhook receiver).`
+        );
+      boldtrailNoteLogged = true;
+    } catch (err) {
+      console.error(`Failed to log BoldTrail note for contact ${contactId}:`, err.message);
+    }
+  }
+
   // SMS DISABLED 2026-08-03 (Gus's rewire decision: "BoldTrail owns it, GHL
   // steps back"). BoldTrail's "GR New Construction Buyer - New Lead
   // Cadence" campaign sends its own "Immediately" SMS touch the instant the
@@ -444,6 +475,7 @@ async function handleLeadWebhook(body) {
     boldtrail: boldtrailResult,
     email_sent: !emailResult?.error,
     email_error: emailResult?.error || null,
+    boldtrail_note_logged: boldtrailNoteLogged,
     sms_attempted: false,
     sms_sent: false,
     sms_error: null,
