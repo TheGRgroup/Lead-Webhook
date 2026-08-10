@@ -586,6 +586,56 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // ADDED 2026-08-10 (one-time data-repair tool, not part of the normal lead
+  // flow). Historical bug (fixed above, commit 8c16ce4) silently dropped
+  // phone numbers on push, so a batch of real leads landed in BoldTrail with
+  // phone: null even though GHL had a verified number. This route lets Gus's
+  // Claude session correct just those specific, individually-reviewed
+  // contacts by calling the same upsert-safe pushContactToBoldTrail() used
+  // for live leads, WITHOUT going through /lead-webhook's idempotency tag
+  // check (which would otherwise skip already-pushed contacts). Same token
+  // gate as /lead-webhook. Body: JSON array of {firstName,lastName,email,phone}.
+  // Every contact in this batch was individually confirmed to have said
+  // "Yes, I agree" on GHL's consent field before being included — this route
+  // does not check consent itself, so it must only ever be called with a
+  // pre-vetted list.
+  if (req.method === "POST" && req.url.startsWith("/backfill-phone")) {
+    const token = new URL(req.url, `http://${req.headers.host}`).searchParams.get("token");
+    if (!WEBHOOK_TOKEN || token !== WEBHOOK_TOKEN) {
+      res.writeHead(401, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify({ ok: false, error: "missing or wrong token" }));
+    }
+    let bodyStr = "";
+    req.on("data", (chunk) => {
+      bodyStr += chunk;
+      if (bodyStr.length > 2e5) req.destroy();
+    });
+    req.on("end", async () => {
+      let items = [];
+      try {
+        items = JSON.parse(bodyStr || "[]");
+      } catch {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        return res.end(JSON.stringify({ ok: false, error: "body must be a JSON array" }));
+      }
+      const results = [];
+      for (const item of items) {
+        try {
+          const r = await pushContactToBoldTrail(
+            { firstName: item.firstName, lastName: item.lastName, email: item.email, phone: item.phone },
+            `${item.firstName || ""} ${item.lastName || ""}`.trim()
+            );
+          results.push({ email: item.email, ...r });
+        } catch (err) {
+          results.push({ email: item.email, pushed: false, error: err.message });
+        }
+      }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true, results }));
+    });
+    return;
+  }
+  
   res.writeHead(404, { "Content-Type": "text/plain" });
   res.end("Not found");
 });
