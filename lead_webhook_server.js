@@ -230,7 +230,11 @@ async function btFetch(pathStr, options = {}) {
   });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(`BoldTrail API ${res.status}: ${text}`);
+    // ADDED 2026-08-10: attach the raw status so callers (pushContactToBoldTrail's
+    // 409 upsert fallback below) can branch on it without re-parsing the message.
+    const err = new Error(`BoldTrail API ${res.status}: ${text}`);
+    err.status = res.status;
+    throw err;
   }
   return res.json();
 }
@@ -253,9 +257,48 @@ async function pushContactToBoldTrail(raw, name) {
     cell_phone_1: raw.phone || undefined,
     source: "GHL",
   };
-  const data = await btFetch("/contact", { method: "POST", body: JSON.stringify(payload) });
-  const contactId = data.id || data.data?.id || null;
-  return { pushed: true, boldtrail_contact_id: contactId };
+  try {
+    const data = await btFetch("/contact", { method: "POST", body: JSON.stringify(payload) });
+    const contactId = data.id || data.data?.id || null;
+    return { pushed: true, boldtrail_contact_id: contactId };
+  } catch (err) {
+    // ADDED 2026-08-10 (Gus: "they are not putting their number in" — this is
+    // the other half of that bug. This runs for EVERY new GHL lead, so a
+    // returning contact — same email from a prior import/visit — 409s on
+    // create with no upsert support, and before this fix that error just got
+    // logged and swallowed: the existing BoldTrail record's phone/name never
+    // got corrected with what the new GHL lead actually submitted. Now: on
+    // 409, search BoldTrail by email and PUT-update that record instead.
+    // Same "email can match more than one person" disambiguation as
+    // server.js's handlePushNewLead — only auto-resolve on an unambiguous
+    // match, never guess and overwrite the wrong person.
+    if (err.status !== 409 || !payload.email) throw err;
+    const params = new URLSearchParams({ search: payload.email, limit: "20" });
+    const found = await btFetch(`/contacts?${params}`);
+    const candidates = found.data || found.contacts || found || [];
+    let existingId = null;
+    if (candidates.length === 1) {
+      existingId = candidates[0].id;
+    } else if (candidates.length > 1) {
+      const nameNorm = `${firstName || ""} ${lastName || ""}`.trim().toLowerCase();
+      const nameMatches = candidates.filter((c) => {
+        const cName = c.name || `${c.first_name || ""} ${c.last_name || ""}`.trim();
+        return String(cName).trim().toLowerCase() === nameNorm;
+      });
+      if (nameMatches.length === 1) existingId = nameMatches[0].id;
+    }
+    if (!existingId) throw err; // can't safely resolve — surface the original 409
+    const current = await btFetch(`/contact/${existingId}`);
+    const c = current.data || current;
+    const updatePayload = {
+      email: payload.email || c.email,
+      cell_phone_1: payload.cell_phone_1 || c.cell_phone_1 || c.cell_phone_2 || c.home_phone || c.work_phone || undefined,
+      first_name: payload.first_name || c.first_name,
+      last_name: payload.last_name || c.last_name,
+    };
+    const updated = await btFetch(`/contact/${existingId}`, { method: "PUT", body: JSON.stringify(updatePayload) });
+    return { pushed: true, updated: true, boldtrail_contact_id: updated.id || updated.data?.id || existingId };
+  }
 }
 
 // ADDED 2026-08-10 (Gus: "I don't see any follow up... going on" — he only
