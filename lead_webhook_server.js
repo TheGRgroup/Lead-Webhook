@@ -401,6 +401,124 @@ async function notifyGusHotLead(name, phone) {
   return sendSms(GUS_CONTACT_ID, message);
 }
 
+// ADDED 2026-08-11 (task #89 -- daily digest + hosted status page, so the SMS Gus gets can contain a real link he can open away from this machine). Walks every GHL contact via the same /contacts/ pagination server.js's get_ghl_leads tool uses. Confirmed live 2026-08-11 this account only has ~600 contacts total, so paging all of them (about 7 requests of 100) is cheap. Sorted newest-first (confirmed live), but this always walks the full set so hot/warm/cold totals are accurate, not just the newest page.
+async function fetchAllGhlContacts(maxPages) {
+  if (!maxPages) maxPages = 25;
+  const all = [];
+  let startAfter = null;
+  let startAfterId = null;
+  for (let page = 0; page < maxPages; page++) {
+    let path = `/contacts/?locationId=${GHL_LOCATION_ID}&limit=100`;
+    if (startAfter && startAfterId) {
+      path += `&startAfter=${startAfter}&startAfterId=${startAfterId}`;
+    }
+    const data = await ghlFetch(path);
+    const batch = data.contacts || [];
+    all.push(...batch);
+    if (batch.length < 100) break;
+    const last = batch[batch.length - 1];
+    startAfter = new Date(last.dateAdded).getTime();
+    startAfterId = last.id;
+  }
+  return all;
+}
+
+// Same tier/consent/suppression signals as handleLeadWebhook, applied across the whole contact base for display purposes. This is the ONLY suppression signal reachable from Render (GHL dnd flag + a loose STOP-tag match) -- the local dnc.txt/consents.csv on Gus's PC are not reachable here, so this dashboard is GHL's view of the world, not the fuller server.js one. Noted on the page itself.
+function summarizeContact(raw) {
+  const name = `${raw.firstName || ""} ${raw.lastName || ""}`.trim() || raw.contactName || raw.name || "(no name)";
+  const tags = (raw.tags || []).map((t) => String(t).toLowerCase());
+  const stoppedInGhl = tags.some((t) => /unsubscribed|opt-out|optout|stop/i.test(t));
+  const suppressed = Boolean(raw.dnd) || stoppedInGhl;
+  const readiness = ghlReadinessValue(raw.customFields);
+  const tier = leadTemperature(readiness);
+  const consentOnFile = ghlConsentValue(raw.customFields);
+  const phoneOutreachOk = Boolean(raw.phone && consentOnFile && !suppressed);
+  return {
+    id: raw.id,
+    name,
+    email: raw.email || null,
+    phone: raw.phone || null,
+    source: raw.source || null,
+    date_added: raw.dateAdded || null,
+    tier,
+    suppressed,
+    phone_outreach_ok: phoneOutreachOk,
+  };
+}
+
+async function buildDashboardData() {
+  const raw = await fetchAllGhlContacts();
+  const contacts = raw.map(summarizeContact);
+  const now = Date.now();
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const newLast24h = contacts.filter((c) => c.date_added && now - new Date(c.date_added).getTime() < DAY_MS);
+  const hot = contacts.filter((c) => c.tier === "hot" && !c.suppressed);
+  const warm = contacts.filter((c) => c.tier === "warm" && !c.suppressed);
+  const cold = contacts.filter((c) => c.tier === "cold" && !c.suppressed);
+  const suppressedCount = contacts.filter((c) => c.suppressed).length;
+  return {
+    generated_at: new Date().toISOString(),
+    total: contacts.length,
+    counts: { hot: hot.length, warm: warm.length, cold: cold.length, suppressed: suppressedCount },
+    new_last_24h: newLast24h,
+    hot,
+    contacts,
+  };
+}
+
+function escHtml(s) {
+  if (s === null || s === undefined) return "";
+  return String(s).replace(/[&<>"']/g, (c) => {
+    if (c === "&") return "&amp;";
+    if (c === "<") return "&lt;";
+    if (c === ">") return "&gt;";
+    if (c === "\"") return "&quot;";
+    return "&#39;";
+  });
+}
+
+function renderDashboardHtml(d) {
+  function row(c) {
+    return `<tr><td>${escHtml(c.name)}</td><td>${escHtml(c.phone || c.email || "-")}</td><td>${escHtml(c.source || "-")}</td><td>${escHtml(c.tier)}</td></tr>`;
+  }
+  const newRows = d.new_last_24h.length ? `<table>${d.new_last_24h.map(row).join("")}</table>` : `<div class="empty">No new leads in the last 24 hours.</div>`;
+  const hotRows = d.hot.length ? `<table>${d.hot.map(row).join("")}</table>` : `<div class="empty">No hot leads right now.</div>`;
+  const when = new Date(d.generated_at).toLocaleString("en-US", { timeZone: "America/Los_Angeles" });
+  return `<!DOCTYPE html>
+  <html><head><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GR Group Lead Status</title>
+  <style>
+  body{font-family:-apple-system,Helvetica,Arial,sans-serif;background:#f4f5f7;margin:0;padding:16px;color:#1a1d23}
+  h1{font-size:18px;margin:0 0 4px}
+  .sub{color:#6b7280;font-size:12px;margin-bottom:16px}
+  .cards{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:20px}
+  .card{background:#fff;border-radius:10px;padding:12px 16px;flex:1;min-width:80px;text-align:center}
+  .card .n{font-size:22px;font-weight:700}
+  .card .l{font-size:11px;color:#6b7280;text-transform:uppercase}
+  .hot .n{color:#dc2626}
+  .warm .n{color:#d97706}
+  .cold .n{color:#2563eb}
+  section{background:#fff;border-radius:10px;padding:14px;margin-bottom:16px}
+  section h2{font-size:14px;margin:0 0 10px}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  td{padding:6px 4px;border-bottom:1px solid #eee}
+  .empty{color:#9ca3af;font-size:13px}
+  .note{font-size:11px;color:#9ca3af;margin-top:20px;line-height:1.5}
+  </style></head><body>
+  <h1>Lead Status</h1>
+  <div class="sub">Updated ${escHtml(when)} PT</div>
+  <div class="cards">
+  <div class="card hot"><div class="n">${d.counts.hot}</div><div class="l">Hot</div></div>
+  <div class="card warm"><div class="n">${d.counts.warm}</div><div class="l">Warm</div></div>
+  <div class="card cold"><div class="n">${d.counts.cold}</div><div class="l">Cold</div></div>
+  <div class="card"><div class="n">${d.total}</div><div class="l">Total</div></div>
+  </div>
+  <section><h2>New in last 24h (${d.new_last_24h.length})</h2>${newRows}</section>
+  <section><h2>Hot - needs a response (${d.hot.length})</h2>${hotRows}</section>
+  <div class="note">This page reflects GoHighLevel's own suppression/consent signals only (dnd flag + a loose STOP-tag match). It does not include the local do-not-contact list on Gus's PC, which is a separate, more complete check used in the full Cowork dashboard.</div>
+  </body></html>`;
+}
+
 async function handleLeadWebhook(body) {
   const contactId = extractContactId(body);
   if (!contactId) {
@@ -633,6 +751,48 @@ const server = http.createServer((req, res) => {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true, results }));
     });
+    return;
+  }
+  
+if (req.method === "GET" && req.url.startsWith("/dashboard")) {
+  const token = new URL(req.url, `http://${req.headers.host}`).searchParams.get("token");
+  if (!WEBHOOK_TOKEN || token !== WEBHOOK_TOKEN) {
+    res.writeHead(401, { "Content-Type": "text/plain" });
+    return res.end("Missing or wrong token");
+  }
+  buildDashboardData()
+    .then((d) => {
+      res.writeHead(200, { "Content-Type": "text/html" });
+      res.end(renderDashboardHtml(d));
+    })
+    .catch((err) => {
+      console.error("Dashboard build error:", err.message);
+      res.writeHead(500, { "Content-Type": "text/plain" });
+      res.end("Error building dashboard: " + err.message);
+    });
+  return;
+}
+  
+  // ADDED 2026-08-11 (task #89). Same token gate as every other route here. Computes the same summary as /dashboard and texts Gus a short digest with a real link back to it -- this is what the daily Cowork scheduled task hits every morning.
+  if (req.method === "GET" && req.url.startsWith("/send-digest")) {
+    const token = new URL(req.url, `http://${req.headers.host}`).searchParams.get("token");
+    if (!WEBHOOK_TOKEN || token !== WEBHOOK_TOKEN) {
+      res.writeHead(401, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify({ ok: false, error: "missing or wrong token" }));
+    }
+    buildDashboardData()
+      .then(async (d) => {
+        const link = `https://${req.headers.host}/dashboard?token=${WEBHOOK_TOKEN}`;
+        const message = `Lead update: ${d.new_last_24h.length} new in last 24h, ${d.counts.hot} hot needing a response. ${d.total} leads total. Full list: ${link}`;
+        await sendSms(GUS_CONTACT_ID, message);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true, summary: { new_last_24h: d.new_last_24h.length, hot: d.counts.hot, total: d.total } }));
+      })
+      .catch((err) => {
+        console.error("Digest send error:", err.message);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: false, error: err.message }));
+      });
     return;
   }
   
