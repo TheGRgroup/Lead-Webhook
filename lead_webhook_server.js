@@ -103,6 +103,29 @@ const DECLINED_CONTACT_TAG = "declined-contact-do-not-automate";
 const VOICE_CALL_OK_TAG = "voice-call-ok";
 const SMS_OPTIN_URL = "https://consent-r7gu.onrender.com";
 
+// ADDED 2026-08-13 (task #114, follow-up to today's Zillow-style consent fix —
+// see the "New Construction - Consent Disclaimer" form work). The old form
+// (1038574668870615) had consent as its OWN Yes/No question, mapped to
+// GHL_CONSENT_FIELD_ID — that's what ghlConsentValue() below reads. The new
+// form removes that question entirely and instead shows the same TCPA
+// language as a mandatory disclaimer directly above Submit (can't submit
+// without it) — so there is no longer any customField answer to check for
+// leads from this form. Without this override, every new-form lead would
+// read as consent_on_file=false (no matching customField = "not found" =
+// false), silently undoing the whole point of moving to the disclaimer
+// pattern. The live ad ("New Construction 2026" > Ad set 1 > Ad 1, account
+// 1455220332587658) was repointed at this form today — confirmed via a real
+// GHL contact's attributionSource.formId, which is where this reads from
+// (present on every GHL contact created via a Facebook Lead Ads form,
+// verified via dump_raw_ghl_contact on a live lead before this change).
+const NEW_CONSENT_FORM_ID = "1353472936962934";
+
+function submittedViaConsentDisclaimerForm(raw) {
+  const formId =
+    raw?.attributionSource?.formId || raw?.lastAttributionSource?.formId || null;
+  return formId === NEW_CONSENT_FORM_ID;
+}
+
 // ADDED 2026-08-07 (Gus: "that also captures them on BT but it shows them
 // houses available in their area" — this was NOT already wired anywhere.
 // Checked every email template in this file and in server.js's full
@@ -352,8 +375,12 @@ function ghlReadinessValue(customFields) {
 // wins over any other signal in the array — same fix as server.js's
 // ghlConsentValue, duplicated here since this is a separate deployed
 // service with no shared module.
-function ghlConsentValue(customFields) {
-  const f = (customFields || []).find((cf) => cf.id === GHL_CONSENT_FIELD_ID);
+function ghlConsentValue(raw) {
+  // ADDED 2026-08-13 — see NEW_CONSENT_FORM_ID comment above. Submitting this
+  // form IS the consent signal (mandatory disclaimer, no way to submit
+  // without agreeing) — there is no separate question left to read.
+  if (submittedViaConsentDisclaimerForm(raw)) return true;
+  const f = (raw?.customFields || []).find((cf) => cf.id === GHL_CONSENT_FIELD_ID);
   if (!f) return false;
   const v = f.value;
   const values = (Array.isArray(v) ? v : [v]).map((x) => String(x ?? "").trim().toLowerCase());
@@ -395,8 +422,11 @@ function ghlConsentValue(customFields) {
 // they affirmatively say no" — used below to skip the BoldTrail push and
 // our own email touch entirely for that group, rather than pushing them
 // into a pipeline this service doesn't control the automation of.
-function ghlExplicitlyDeclinedContact(customFields) {
-  const f = (customFields || []).find((cf) => cf.id === GHL_CONSENT_FIELD_ID);
+function ghlExplicitlyDeclinedContact(raw) {
+  // ADDED 2026-08-13 — no separate question exists on the new consent-
+  // disclaimer form to decline; submitting it means they agreed, full stop.
+  if (submittedViaConsentDisclaimerForm(raw)) return false;
+  const f = (raw?.customFields || []).find((cf) => cf.id === GHL_CONSENT_FIELD_ID);
   if (!f) return false;
   const v = f.value;
   const values = (Array.isArray(v) ? v : [v]).map((x) => String(x ?? "").trim().toLowerCase());
@@ -486,7 +516,7 @@ async function handleLeadWebhook(body) {
   // PUSHED_TO_BOLDTRAIL_TAG or INSTANT_TOUCH_TAG, so if this logic is ever
   // wrong for a given contact, re-running the webhook won't be blocked by
   // an idempotency guard meant for a different case.
-  if (ghlExplicitlyDeclinedContact(raw.customFields) && !tags.includes(DECLINED_CONTACT_TAG)) {
+  if (ghlExplicitlyDeclinedContact(raw) && !tags.includes(DECLINED_CONTACT_TAG)) {
     await addTags(contactId, [DECLINED_CONTACT_TAG]).catch((err) =>
       console.error(`Contact ${contactId} declined contact but failed to tag it in GHL:`, err.message)
     );
@@ -555,7 +585,7 @@ async function handleLeadWebhook(body) {
   const readiness = ghlReadinessValue(raw.customFields);
   const tier = leadTemperature(readiness);
   const readinessTag = READINESS_TAGS[tier];
-  const consentOnFile = ghlConsentValue(raw.customFields);
+  const consentOnFile = ghlConsentValue(raw);
   const phoneOutreachOk = Boolean(raw.phone && consentOnFile);
 
   const tagsToApply = [readinessTag, INSTANT_TOUCH_TAG];
