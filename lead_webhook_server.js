@@ -84,6 +84,8 @@ const GHL_READINESS_FIELD_ID = "5Ki01GIRnf1Lp0z6k1SE";
 const GHL_CONSENT_FIELD_ID = "c1e2KGBr92A5BWNTylGZ";
 const INSTANT_TOUCH_TAG = "instant-touch-sent";
 const READINESS_TAGS = { hot: "readiness-hot", warm: "readiness-warm", cold: "readiness-cold" };
+// ADDED 2026-08-12 — see ghlExplicitlyDeclinedContact() below for why this exists.
+const DECLINED_CONTACT_TAG = "declined-contact-do-not-automate";
 const SMS_OPTIN_URL = "https://consent-r7gu.onrender.com";
 
 // ADDED 2026-08-07 (Gus: "that also captures them on BT but it shows them
@@ -250,6 +252,12 @@ async function btFetch(pathStr, options = {}) {
 async function pushContactToBoldTrail(raw, name) {
   const firstName = raw.firstName || firstNameOf(name);
   const lastName = raw.lastName || "";
+  // BUG FIX (2026-08-10): kvcore's contact field is "cell_phone_1", not
+  // "phone" — sending "phone" was silently dropped by the API, so every
+  // lead pushed through this webhook landed in BoldTrail with no phone
+  // number at all, even when GHL had a verified one. Confirmed by
+  // dumping a raw GHL contact whose phone was present at the instant of
+  // creation, yet showed up null on the BoldTrail side.
   const payload = {
     first_name: firstName || "Unknown",
     last_name: lastName,
@@ -344,6 +352,42 @@ function ghlConsentValue(customFields) {
   return values.some((x) => x.length > 0);
 }
 
+// ADDED 2026-08-12 (real incident, not theoretical): jojo124
+// (jcina6653@gmail.com) answered "No, please don't contact me" on this
+// exact question, GHL correctly recorded consent_on_file=false, but this
+// service still pushed him into BoldTrail as a plain New Lead — and
+// BoldTrail's own "GR New Construction Buyer - New Lead Cadence" Smart
+// Campaign (native BoldTrail automation, triggers on Status IS New Lead,
+// has no knowledge of this GHL field at all) texted him anyway 15 hours
+// later. He had to reply STOP himself. A second contact the same day
+// (Frances Fantore, same "No" answer) was saved only by coincidence — her
+// number happened to already be on BoldTrail's National DNC Registry
+// check, which is unrelated to this question and not something every
+// declining lead's number will hit.
+//
+// Root cause: BoldTrail's Smart Campaign is a separate, native automation
+// this service cannot see or gate from the outside once a contact is
+// pushed in as "New Lead" — there is no known BoldTrail API field to mark
+// a contact do-not-contact for our own reasons (its DNC flag is registry-
+// derived, not settable per our own consent logic), and no reliable way to
+// beat the campaign's send with an after-the-fact status change (confirmed
+// varying delay: ~1 minute for Frances, ~15 hours for jojo124 — too
+// unpredictable to race against).
+//
+// Fix: never hand an explicit decliner to BoldTrail's automation at all.
+// ghlConsentValue() answers "is texting/automation OK" (false covers both
+// "said no" and "no answer yet"); this answers the narrower question "did
+// they affirmatively say no" — used below to skip the BoldTrail push and
+// our own email touch entirely for that group, rather than pushing them
+// into a pipeline this service doesn't control the automation of.
+function ghlExplicitlyDeclinedContact(customFields) {
+  const f = (customFields || []).find((cf) => cf.id === GHL_CONSENT_FIELD_ID);
+  if (!f) return false;
+  const v = f.value;
+  const values = (Array.isArray(v) ? v : [v]).map((x) => String(x ?? "").trim().toLowerCase());
+  return values.some((x) => x === "no" || x.includes("don't contact") || x.includes("do not contact"));
+}
+
 function leadTemperature(readiness) {
   if (readiness === "NOW!") return "hot";
   if (readiness === "1-3 Months" || readiness === "3-6 Months") return "warm";
@@ -401,124 +445,6 @@ async function notifyGusHotLead(name, phone) {
   return sendSms(GUS_CONTACT_ID, message);
 }
 
-// ADDED 2026-08-11 (task #89 -- daily digest + hosted status page, so the SMS Gus gets can contain a real link he can open away from this machine). Walks every GHL contact via the same /contacts/ pagination server.js's get_ghl_leads tool uses. Confirmed live 2026-08-11 this account only has ~600 contacts total, so paging all of them (about 7 requests of 100) is cheap. Sorted newest-first (confirmed live), but this always walks the full set so hot/warm/cold totals are accurate, not just the newest page.
-async function fetchAllGhlContacts(maxPages) {
-  if (!maxPages) maxPages = 25;
-  const all = [];
-  let startAfter = null;
-  let startAfterId = null;
-  for (let page = 0; page < maxPages; page++) {
-    let path = `/contacts/?locationId=${GHL_LOCATION_ID}&limit=100`;
-    if (startAfter && startAfterId) {
-      path += `&startAfter=${startAfter}&startAfterId=${startAfterId}`;
-    }
-    const data = await ghlFetch(path);
-    const batch = data.contacts || [];
-    all.push(...batch);
-    if (batch.length < 100) break;
-    const last = batch[batch.length - 1];
-    startAfter = new Date(last.dateAdded).getTime();
-    startAfterId = last.id;
-  }
-  return all;
-}
-
-// Same tier/consent/suppression signals as handleLeadWebhook, applied across the whole contact base for display purposes. This is the ONLY suppression signal reachable from Render (GHL dnd flag + a loose STOP-tag match) -- the local dnc.txt/consents.csv on Gus's PC are not reachable here, so this dashboard is GHL's view of the world, not the fuller server.js one. Noted on the page itself.
-function summarizeContact(raw) {
-  const name = `${raw.firstName || ""} ${raw.lastName || ""}`.trim() || raw.contactName || raw.name || "(no name)";
-  const tags = (raw.tags || []).map((t) => String(t).toLowerCase());
-  const stoppedInGhl = tags.some((t) => /unsubscribed|opt-out|optout|stop/i.test(t));
-  const suppressed = Boolean(raw.dnd) || stoppedInGhl;
-  const readiness = ghlReadinessValue(raw.customFields);
-  const tier = leadTemperature(readiness);
-  const consentOnFile = ghlConsentValue(raw.customFields);
-  const phoneOutreachOk = Boolean(raw.phone && consentOnFile && !suppressed);
-  return {
-    id: raw.id,
-    name,
-    email: raw.email || null,
-    phone: raw.phone || null,
-    source: raw.source || null,
-    date_added: raw.dateAdded || null,
-    tier,
-    suppressed,
-    phone_outreach_ok: phoneOutreachOk,
-  };
-}
-
-async function buildDashboardData() {
-  const raw = await fetchAllGhlContacts();
-  const contacts = raw.map(summarizeContact);
-  const now = Date.now();
-  const DAY_MS = 24 * 60 * 60 * 1000;
-  const newLast24h = contacts.filter((c) => c.date_added && now - new Date(c.date_added).getTime() < DAY_MS);
-  const hot = contacts.filter((c) => c.tier === "hot" && !c.suppressed);
-  const warm = contacts.filter((c) => c.tier === "warm" && !c.suppressed);
-  const cold = contacts.filter((c) => c.tier === "cold" && !c.suppressed);
-  const suppressedCount = contacts.filter((c) => c.suppressed).length;
-  return {
-    generated_at: new Date().toISOString(),
-    total: contacts.length,
-    counts: { hot: hot.length, warm: warm.length, cold: cold.length, suppressed: suppressedCount },
-    new_last_24h: newLast24h,
-    hot,
-    contacts,
-  };
-}
-
-function escHtml(s) {
-  if (s === null || s === undefined) return "";
-  return String(s).replace(/[&<>"']/g, (c) => {
-    if (c === "&") return "&amp;";
-    if (c === "<") return "&lt;";
-    if (c === ">") return "&gt;";
-    if (c === "\"") return "&quot;";
-    return "&#39;";
-  });
-}
-
-function renderDashboardHtml(d) {
-  function row(c) {
-    return `<tr><td>${escHtml(c.name)}</td><td>${escHtml(c.phone || c.email || "-")}</td><td>${escHtml(c.source || "-")}</td><td>${escHtml(c.tier)}</td></tr>`;
-  }
-  const newRows = d.new_last_24h.length ? `<table>${d.new_last_24h.map(row).join("")}</table>` : `<div class="empty">No new leads in the last 24 hours.</div>`;
-  const hotRows = d.hot.length ? `<table>${d.hot.map(row).join("")}</table>` : `<div class="empty">No hot leads right now.</div>`;
-  const when = new Date(d.generated_at).toLocaleString("en-US", { timeZone: "America/Los_Angeles" });
-  return `<!DOCTYPE html>
-  <html><head><meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>GR Group Lead Status</title>
-  <style>
-  body{font-family:-apple-system,Helvetica,Arial,sans-serif;background:#f4f5f7;margin:0;padding:16px;color:#1a1d23}
-  h1{font-size:18px;margin:0 0 4px}
-  .sub{color:#6b7280;font-size:12px;margin-bottom:16px}
-  .cards{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:20px}
-  .card{background:#fff;border-radius:10px;padding:12px 16px;flex:1;min-width:80px;text-align:center}
-  .card .n{font-size:22px;font-weight:700}
-  .card .l{font-size:11px;color:#6b7280;text-transform:uppercase}
-  .hot .n{color:#dc2626}
-  .warm .n{color:#d97706}
-  .cold .n{color:#2563eb}
-  section{background:#fff;border-radius:10px;padding:14px;margin-bottom:16px}
-  section h2{font-size:14px;margin:0 0 10px}
-  table{width:100%;border-collapse:collapse;font-size:13px}
-  td{padding:6px 4px;border-bottom:1px solid #eee}
-  .empty{color:#9ca3af;font-size:13px}
-  .note{font-size:11px;color:#9ca3af;margin-top:20px;line-height:1.5}
-  </style></head><body>
-  <h1>Lead Status</h1>
-  <div class="sub">Updated ${escHtml(when)} PT</div>
-  <div class="cards">
-  <div class="card hot"><div class="n">${d.counts.hot}</div><div class="l">Hot</div></div>
-  <div class="card warm"><div class="n">${d.counts.warm}</div><div class="l">Warm</div></div>
-  <div class="card cold"><div class="n">${d.counts.cold}</div><div class="l">Cold</div></div>
-  <div class="card"><div class="n">${d.total}</div><div class="l">Total</div></div>
-  </div>
-  <section><h2>New in last 24h (${d.new_last_24h.length})</h2>${newRows}</section>
-  <section><h2>Hot - needs a response (${d.hot.length})</h2>${hotRows}</section>
-  <div class="note">This page reflects GoHighLevel's own suppression/consent signals only (dnd flag + a loose STOP-tag match). It does not include the local do-not-contact list on Gus's PC, which is a separate, more complete check used in the full Cowork dashboard.</div>
-  </body></html>`;
-}
-
 async function handleLeadWebhook(body) {
   const contactId = extractContactId(body);
   if (!contactId) {
@@ -532,6 +458,32 @@ async function handleLeadWebhook(body) {
     `${raw.firstName || ""} ${raw.lastName || ""}`.trim() || raw.contactName || raw.name || "";
   const tags = (raw.tags || []).map((t) => String(t).toLowerCase());
   const source = raw.source || null;
+
+  // ADDED 2026-08-12 (real incident — see ghlExplicitlyDeclinedContact()
+  // comment above for the full jojo124 story). This check runs BEFORE the
+  // BoldTrail push and BEFORE the email touch, and skips both entirely —
+  // no automated system this service controls should touch someone who
+  // explicitly said not to contact them, and pushing them into BoldTrail
+  // as a "New Lead" is exactly what handed them to BoldTrail's own
+  // Smart Campaign automation last time. Still tags them in GHL (so
+  // there's a visible record and Gus can decide on a manual, compliant
+  // follow-up if any) and returns early — deliberately does NOT touch
+  // PUSHED_TO_BOLDTRAIL_TAG or INSTANT_TOUCH_TAG, so if this logic is ever
+  // wrong for a given contact, re-running the webhook won't be blocked by
+  // an idempotency guard meant for a different case.
+  if (ghlExplicitlyDeclinedContact(raw.customFields) && !tags.includes(DECLINED_CONTACT_TAG)) {
+    await addTags(contactId, [DECLINED_CONTACT_TAG]).catch((err) =>
+      console.error(`Contact ${contactId} declined contact but failed to tag it in GHL:`, err.message)
+    );
+    console.error(`Contact ${contactId} (${name}) explicitly declined contact — not pushed to BoldTrail, no automated touch sent.`);
+    return {
+      ok: true,
+      skipped: true,
+      reason: "explicit no-contact consent answer — not pushed to BoldTrail (its Smart Campaign has no consent check of its own), no automated email sent",
+      contact_id: contactId,
+      name,
+    };
+  }
 
   // TASK #68 (2026-08-03): push every new GHL lead into BoldTrail
   // immediately, regardless of source — this runs before the
@@ -616,7 +568,7 @@ async function handleLeadWebhook(body) {
         boldtrailResult.boldtrail_contact_id,
         "Email Sent",
         `Instant touch #1 sent: "${subject}" (${tier} tier, via GHL webhook receiver).`
-        );
+      );
       boldtrailNoteLogged = true;
     } catch (err) {
       console.error(`Failed to log BoldTrail note for contact ${contactId}:`, err.message);
@@ -704,98 +656,6 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // ADDED 2026-08-10 (one-time data-repair tool, not part of the normal lead
-  // flow). Historical bug (fixed above, commit 8c16ce4) silently dropped
-  // phone numbers on push, so a batch of real leads landed in BoldTrail with
-  // phone: null even though GHL had a verified number. This route lets Gus's
-  // Claude session correct just those specific, individually-reviewed
-  // contacts by calling the same upsert-safe pushContactToBoldTrail() used
-  // for live leads, WITHOUT going through /lead-webhook's idempotency tag
-  // check (which would otherwise skip already-pushed contacts). Same token
-  // gate as /lead-webhook. Body: JSON array of {firstName,lastName,email,phone}.
-  // Every contact in this batch was individually confirmed to have said
-  // "Yes, I agree" on GHL's consent field before being included — this route
-  // does not check consent itself, so it must only ever be called with a
-  // pre-vetted list.
-  if (req.method === "POST" && req.url.startsWith("/backfill-phone")) {
-    const token = new URL(req.url, `http://${req.headers.host}`).searchParams.get("token");
-    if (!WEBHOOK_TOKEN || token !== WEBHOOK_TOKEN) {
-      res.writeHead(401, { "Content-Type": "application/json" });
-      return res.end(JSON.stringify({ ok: false, error: "missing or wrong token" }));
-    }
-    let bodyStr = "";
-    req.on("data", (chunk) => {
-      bodyStr += chunk;
-      if (bodyStr.length > 2e5) req.destroy();
-    });
-    req.on("end", async () => {
-      let items = [];
-      try {
-        items = JSON.parse(bodyStr || "[]");
-      } catch {
-        res.writeHead(400, { "Content-Type": "application/json" });
-        return res.end(JSON.stringify({ ok: false, error: "body must be a JSON array" }));
-      }
-      const results = [];
-      for (const item of items) {
-        try {
-          const r = await pushContactToBoldTrail(
-            { firstName: item.firstName, lastName: item.lastName, email: item.email, phone: item.phone },
-            `${item.firstName || ""} ${item.lastName || ""}`.trim()
-            );
-          results.push({ email: item.email, ...r });
-        } catch (err) {
-          results.push({ email: item.email, pushed: false, error: err.message });
-        }
-      }
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ ok: true, results }));
-    });
-    return;
-  }
-  
-if (req.method === "GET" && req.url.startsWith("/dashboard")) {
-  const token = new URL(req.url, `http://${req.headers.host}`).searchParams.get("token");
-  if (!WEBHOOK_TOKEN || token !== WEBHOOK_TOKEN) {
-    res.writeHead(401, { "Content-Type": "text/plain" });
-    return res.end("Missing or wrong token");
-  }
-  buildDashboardData()
-    .then((d) => {
-      res.writeHead(200, { "Content-Type": "text/html" });
-      res.end(renderDashboardHtml(d));
-    })
-    .catch((err) => {
-      console.error("Dashboard build error:", err.message);
-      res.writeHead(500, { "Content-Type": "text/plain" });
-      res.end("Error building dashboard: " + err.message);
-    });
-  return;
-}
-  
-  // ADDED 2026-08-11 (task #89). Same token gate as every other route here. Computes the same summary as /dashboard and texts Gus a short digest with a real link back to it -- this is what the daily Cowork scheduled task hits every morning.
-  if (req.method === "GET" && req.url.startsWith("/send-digest")) {
-    const token = new URL(req.url, `http://${req.headers.host}`).searchParams.get("token");
-    if (!WEBHOOK_TOKEN || token !== WEBHOOK_TOKEN) {
-      res.writeHead(401, { "Content-Type": "application/json" });
-      return res.end(JSON.stringify({ ok: false, error: "missing or wrong token" }));
-    }
-    buildDashboardData()
-      .then(async (d) => {
-        const link = `https://${req.headers.host}/dashboard?token=${WEBHOOK_TOKEN}`;
-        const message = `Lead update: ${d.new_last_24h.length} new in last 24h, ${d.counts.hot} hot needing a response. ${d.total} leads total. Full list: ${link}`;
-        await sendSms(GUS_CONTACT_ID, message);
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ ok: true, summary: { new_last_24h: d.new_last_24h.length, hot: d.counts.hot, total: d.total } }));
-      })
-      .catch((err) => {
-        console.error("Digest send error:", err.message);
-        res.writeHead(500, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ ok: false, error: err.message }));
-      });
-    return;
-  }
-  
   res.writeHead(404, { "Content-Type": "text/plain" });
   res.end("Not found");
 });
