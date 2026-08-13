@@ -86,6 +86,21 @@ const INSTANT_TOUCH_TAG = "instant-touch-sent";
 const READINESS_TAGS = { hot: "readiness-hot", warm: "readiness-warm", cold: "readiness-cold" };
 // ADDED 2026-08-12 — see ghlExplicitlyDeclinedContact() below for why this exists.
 const DECLINED_CONTACT_TAG = "declined-contact-do-not-automate";
+// ADDED 2026-08-12 (Gus: "Is Dakota able to call all those last leads?").
+// Investigated the "0. New Construction - New Lead Calls" GHL workflow
+// (the one with the Voice AI outbound call step / Dakota) and found its
+// Facebook Lead Form Submitted trigger is pinned to a specific Page+Form ID
+// that has drifted from the live form (task #57 cloned the lead form to add
+// the TCPA question, giving it a new formId) — enrollment history showed
+// exactly 3 contacts EVER enrolled, all manual test enrollments, ZERO real
+// leads. This tag is the fix: applied here (same place/condition as the
+// P.S. opt-in text below — raw.phone present AND consentOnFile true) and a
+// new "Contact tag added" trigger on this tag was added to that workflow so
+// enrollment no longer depends on Meta's form ID staying put. Deliberately
+// NOT the same tag as INSTANT_TOUCH_TAG above — that one is applied to
+// every Facebook lead regardless of consent, which would re-create the
+// jojo124 problem (calling people who said no) if used as the call trigger.
+const VOICE_CALL_OK_TAG = "voice-call-ok";
 const SMS_OPTIN_URL = "https://consent-r7gu.onrender.com";
 
 // ADDED 2026-08-07 (Gus: "that also captures them on BT but it shows them
@@ -543,7 +558,9 @@ async function handleLeadWebhook(body) {
   const consentOnFile = ghlConsentValue(raw.customFields);
   const phoneOutreachOk = Boolean(raw.phone && consentOnFile);
 
-  await addTags(contactId, [readinessTag, INSTANT_TOUCH_TAG]);
+  const tagsToApply = [readinessTag, INSTANT_TOUCH_TAG];
+  if (phoneOutreachOk) tagsToApply.push(VOICE_CALL_OK_TAG);
+  await addTags(contactId, tagsToApply);
 
   const firstName = firstNameOf(name);
   const template = TOUCH_ONE[tier];
