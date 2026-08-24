@@ -118,12 +118,12 @@ const SMS_OPTIN_URL = "https://consent-r7gu.onrender.com";
 // GHL contact's attributionSource.formId, which is where this reads from
 // (present on every GHL contact created via a Facebook Lead Ads form,
 // verified via dump_raw_ghl_contact on a live lead before this change).
-const NEW_CONSENT_FORM_ID = "1353472936962934";
+const NEW_CONSENT_FORM_IDS = ["1038574668870615", "1353472936962934"];
 
 function submittedViaConsentDisclaimerForm(raw) {
   const formId =
     raw?.attributionSource?.formId || raw?.lastAttributionSource?.formId || null;
-  return formId === NEW_CONSENT_FORM_ID;
+  return NEW_CONSENT_FORM_IDS.includes(formId);
 }
 
 // ADDED 2026-08-07 (Gus: "that also captures them on BT but it shows them
