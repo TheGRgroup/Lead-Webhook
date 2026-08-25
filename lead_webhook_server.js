@@ -118,7 +118,7 @@ const SMS_OPTIN_URL = "https://consent-r7gu.onrender.com";
 // GHL contact's attributionSource.formId, which is where this reads from
 // (present on every GHL contact created via a Facebook Lead Ads form,
 // verified via dump_raw_ghl_contact on a live lead before this change).
-const NEW_CONSENT_FORM_IDS = ["1038574668870615", "1353472936962934"];
+const NEW_CONSENT_FORM_IDS = ["1038574668870615", "1353472936962934", "1534527811321662"];
 
 function submittedViaConsentDisclaimerForm(raw) {
   const formId =
