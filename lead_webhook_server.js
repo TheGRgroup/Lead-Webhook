@@ -425,7 +425,7 @@ function ghlConsentValue(raw) {
 function ghlExplicitlyDeclinedContact(raw) {
   // ADDED 2026-08-13 — no separate question exists on the new consent-
   // disclaimer form to decline; submitting it means they agreed, full stop.
-  if (submittedViaConsentDisclaimerForm(raw)) return false;
+  
   const f = (raw?.customFields || []).find((cf) => cf.id === GHL_CONSENT_FIELD_ID);
   if (!f) return false;
   const v = f.value;
