@@ -121,10 +121,17 @@ const SMS_OPTIN_URL = "https://consent-r7gu.onrender.com";
 const NEW_CONSENT_FORM_IDS = ["1038574668870615", "1353472936962934", "1534527811321662"];
 
 function submittedViaConsentDisclaimerForm(raw) {
-  const formId =
-    raw?.attributionSource?.formId || raw?.lastAttributionSource?.formId || null;
-  return NEW_CONSENT_FORM_IDS.includes(formId);
+    // FIXED 2026-08-27 (task #162): checks BOTH form IDs and matches on
+    // EITHER, not just whichever is truthy first -- the old `||` skipped
+    // lastAttributionSource whenever attributionSource.formId was a truthy but
+    // different (non-disclaimer, first-touch) form ID, silently missing real
+    // later disclaimer-form consent. Confirmed live on Felix Romero.
+    const formIds = [raw?.attributionSource?.formId, raw?.lastAttributionSource?.formId].filter(
+          Boolean
+        );
+    return formIds.some((id) => NEW_CONSENT_FORM_IDS.includes(id));
 }
+  
 
 // ADDED 2026-08-07 (Gus: "that also captures them on BT but it shows them
 // houses available in their area" — this was NOT already wired anywhere.
