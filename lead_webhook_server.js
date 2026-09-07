@@ -118,20 +118,26 @@ const SMS_OPTIN_URL = "https://consent-r7gu.onrender.com";
 // GHL contact's attributionSource.formId, which is where this reads from
 // (present on every GHL contact created via a Facebook Lead Ads form,
 // verified via dump_raw_ghl_contact on a live lead before this change).
-const NEW_CONSENT_FORM_IDS = ["1038574668870615", "1353472936962934", "1534527811321662"];
+// UPDATED 2026-08-24 (Salomon): original ID was stale (form-ID churn — the
+// ad was re-pointed at a new consent-disclaimer form after this override was
+// written for the old one). Confirmed current ID via two real submissions
+// pulled from Meta's Leads Center "Form answers" panel (Felix Romero Aug 9,
+// Juan Manuel Estrada Aug 12 — both show "Lead form ID 1038574668870615").
+// Keeping the old ID too in case any already-synced contacts reference it.
+const NEW_CONSENT_FORM_IDS = ["1038574668870615", "1353472936962934"];
 
+// FIXED 2026-08-27 (task #162, ported from server.js's identical fix — see
+// that file's comment on this same function for the full incident writeup).
+// `attributionSource?.formId || lastAttributionSource?.formId` short-circuits
+// on the first truthy value, so a contact whose ORIGINAL first-touch form
+// differs from their later real disclaimer-form submission never got the
+// second field checked at all. Now checks both and matches on either.
 function submittedViaConsentDisclaimerForm(raw) {
-    // FIXED 2026-08-27 (task #162): checks BOTH form IDs and matches on
-    // EITHER, not just whichever is truthy first -- the old `||` skipped
-    // lastAttributionSource whenever attributionSource.formId was a truthy but
-    // different (non-disclaimer, first-touch) form ID, silently missing real
-    // later disclaimer-form consent. Confirmed live on Felix Romero.
-    const formIds = [raw?.attributionSource?.formId, raw?.lastAttributionSource?.formId].filter(
-          Boolean
-        );
-    return formIds.some((id) => NEW_CONSENT_FORM_IDS.includes(id));
+  const formIds = [raw?.attributionSource?.formId, raw?.lastAttributionSource?.formId].filter(
+    Boolean
+  );
+  return formIds.some((id) => NEW_CONSENT_FORM_IDS.includes(id));
 }
-  
 
 // ADDED 2026-08-07 (Gus: "that also captures them on BT but it shows them
 // houses available in their area" — this was NOT already wired anywhere.
@@ -429,10 +435,24 @@ function ghlConsentValue(raw) {
 // they affirmatively say no" — used below to skip the BoldTrail push and
 // our own email touch entirely for that group, rather than pushing them
 // into a pipeline this service doesn't control the automation of.
+// FIXED 2026-08-25 (real, live incident — found while verifying a server.js
+// port of this same function against jojo124 himself, the contact this
+// whole function was originally written for). The ADDED 2026-08-13
+// short-circuit below — "no separate question exists on the disclaimer
+// form, submitting it means they agreed" — was WRONG for jojo124: his
+// formId (1038574668870615) is in NEW_CONSENT_FORM_IDS, but he also has a
+// real customFields answer of ["No", "please don't contact me"], meaning
+// that form ID was reused/shared with a version that DID ask a real
+// question. The shortcut fired and hid his own explicit decline behind an
+// assumption about the form — meaning this function has been returning
+// false for him this whole time, and DECLINED_CONTACT_TAG was never
+// applied by this webhook despite the "real incident" comment above citing
+// him by name. Removing the shortcut is safe: when no consent customField
+// exists at all (the genuine disclaimer-only case), `if (!f) return false`
+// below already gives the same correct answer — the shortcut only ever
+// changed the outcome when real decline evidence was present, which must
+// never be overridden by an assumption about what a form asks.
 function ghlExplicitlyDeclinedContact(raw) {
-  // ADDED 2026-08-13 — no separate question exists on the new consent-
-  // disclaimer form to decline; submitting it means they agreed, full stop.
-  
   const f = (raw?.customFields || []).find((cf) => cf.id === GHL_CONSENT_FIELD_ID);
   if (!f) return false;
   const v = f.value;
@@ -629,12 +649,50 @@ async function handleLeadWebhook(body) {
     }
   }
 
-  // SMS DISABLED 2026-08-03 (Gus's rewire decision: "BoldTrail owns it, GHL
-  // steps back"). BoldTrail's "GR New Construction Buyer - New Lead
-  // Cadence" campaign sends its own "Immediately" SMS touch the instant the
-  // contact above is pushed in as a New Lead. Sending our own SMS here too
-  // would double-text the lead within seconds of each other. Email touch
-  // #1 above is unaffected — only outbound texting moved to BoldTrail.
+  // SMS RE-ENABLED 2026-09-07 (Gus: "no text right after they submit the
+  // form... get in front of the lead and a better chance to connect").
+  // From 2026-08-03 to today this was deliberately OFF because BoldTrail's
+  // "GR New Construction Buyer - New Lead Cadence" campaign also sends an
+  // "Immediately" SMS once the contact is pushed in as a New Lead a few
+  // lines above — sending here too would double-text. But "BoldTrail owns
+  // it" only works if BoldTrail's side is actually fast, and Gus is now
+  // reporting leads get no text right after submitting — this webhook
+  // fires the instant Meta/GHL hands us the lead, before the BoldTrail
+  // push even completes, so it will always beat BoldTrail's own campaign
+  // trigger to the punch.
+  //
+  // IMPORTANT — this reintroduces the double-text risk this whole block
+  // was built to avoid. Turning this back on is only safe if the
+  // "Immediately" SMS step in BoldTrail's "GR New Construction Buyer - New
+  // Lead Cadence" Smart Campaign is disabled (leave its call/task steps
+  // running — just the SMS step). That's a BoldTrail-side change this
+  // service can't make from here. Until that step is off, every consenting
+  // lead gets texted twice within seconds of each other.
+  let smsAttempted = false;
+  let smsSent = false;
+  let smsError = null;
+  if (phoneOutreachOk) {
+    smsAttempted = true;
+    try {
+      const smsText = renderTemplate(template.sms, firstName);
+      await sendSms(contactId, smsText);
+      smsSent = true;
+      if (boldtrailResult?.boldtrail_contact_id) {
+        try {
+          await logBoldTrailNote(
+            boldtrailResult.boldtrail_contact_id,
+            "Text Sent",
+            `Instant touch #1 SMS sent: "${smsText}" (${tier} tier, via GHL webhook receiver).`
+          );
+        } catch (err) {
+          console.error(`Failed to log BoldTrail SMS note for contact ${contactId}:`, err.message);
+        }
+      }
+    } catch (err) {
+      smsError = err.message;
+      console.error(`Failed to send instant SMS to contact ${contactId}:`, err.message);
+    }
+  }
 
   let gusNotified = false;
   let gusNotifyError = null;
@@ -659,13 +717,13 @@ async function handleLeadWebhook(body) {
     email_sent: !emailResult?.error,
     email_error: emailResult?.error || null,
     boldtrail_note_logged: boldtrailNoteLogged,
-    sms_attempted: false,
-    sms_sent: false,
-    sms_error: null,
-    sms_disabled: true,
+    sms_attempted: smsAttempted,
+    sms_sent: smsSent,
+    sms_error: smsError,
+    sms_disabled: false,
     sms_note: phoneOutreachOk
-      ? "SMS disabled here — BoldTrail's Smart Campaign sends the instant text instead."
-      : "SMS disabled here and phone_outreach_ok was false anyway.",
+      ? "Instant SMS sent from here — make sure BoldTrail's 'Immediately' SMS step is OFF or this lead gets texted twice."
+      : "No SMS sent — phone_outreach_ok was false (no consent on file or no phone).",
     gus_notified: gusNotified,
     gus_notify_error: gusNotifyError,
   };
