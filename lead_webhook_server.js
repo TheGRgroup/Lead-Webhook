@@ -188,6 +188,52 @@ const HOME_SEARCH_URL =
 const GUS_CONTACT_ID = process.env.GUS_GHL_CONTACT_ID || "DXu3cyGnSL3zy1X0FUKx";
 const GUS_NOTIFY_ENABLED = process.env.GUS_NOTIFY_ENABLED !== "false";
 
+// ADDED 2026-09-08 (task #187, Gus's exact instruction: "when she calls and
+// no answer, she sends a text as well to those that didnt answer. and to
+// those that picked up, send a thank you text for talking her call").
+//
+// THE PROBLEM THIS WORKS AROUND: GHL's Voice AI outbound call action (the
+// one that drives Dakota) exposes NO answered/voicemail/no-answer field
+// anywhere reachable from the workflow's own If/Else branch builder — every
+// category in that field picker (Contact details, Company, Date/Time,
+// Workflow trigger, Workflow contact, Events, Custom values) was searched
+// and none of them carry a call-disposition signal. The ONLY place any
+// call-related data surfaces at all is the separate "Webhook" action's
+// Custom Data merge-field picker, under a "Message > Phone Call" category:
+// Phone Call Direction, Duration, From, To, From City — durations, not a
+// disposition flag.
+//
+// THE PROXY: Phone Call Duration is the only signal available, so it's used
+// as a stand-in for answered-vs-not. A call that's actually picked up and
+// talked to (even briefly) reliably runs well past the ring + Dakota's
+// opening line; a call that hits voicemail-and-hangs-up or goes unanswered
+// does not. Threshold picked deliberately on the conservative side (a
+// borderline call counts as "no answer", not "answered") because a wrongly
+// premature "thanks for chatting!" text to someone who never actually
+// talked is a worse, more visible bad experience than an extra "sorry I
+// missed you" text to someone who did pick up.
+const CALL_ANSWERED_DURATION_THRESHOLD_SECONDS = 45;
+
+// Idempotency: this workflow (once task #186's cadence rebuild lands) calls
+// a no-answer contact multiple times across multiple days. Texting "sorry I
+// missed you" after EVERY single no-answer attempt would mean up to a dozen+
+// near-identical texts to someone who's never once answered — sent once per
+// contact, not once per call attempt. Same reasoning for the thank-you text
+// (guards against GHL re-firing the same webhook event, a documented
+// behavior elsewhere in this file, and against a contact who gets called
+// again later for an unrelated reason). Gus: if you actually want a fresh
+// "missed you" text after every single no-answer attempt instead of just
+// the first, say so and this guard comes out.
+const NO_ANSWER_TEXT_SENT_TAG = "dakota-no-answer-text-sent";
+const CALL_THANKYOU_TEXT_SENT_TAG = "dakota-call-thankyou-text-sent";
+
+const CALL_OUTCOME_SMS = {
+  no_answer:
+    "Hi {{FIRST_NAME}}, this is Dakota with GR Group — sorry I missed you! Happy to help with new construction homes in the Coachella Valley whenever works. Call or text me back anytime, or browse what's available now: {{HOME_SEARCH_URL}}",
+  answered:
+    "Hi {{FIRST_NAME}}, thanks for taking my call just now! This is Dakota with GR Group. If anything comes to mind after we talked, just reply here — happy to help.",
+};
+
 // Duplicated from server.js SEQUENCES[tier][0] — see the file header note.
 const TOUCH_ONE = {
   hot: {
@@ -481,6 +527,108 @@ function extractContactId(body) {
   );
 }
 
+// ADDED 2026-09-08 (task #187) — same defensive multi-shape approach as
+// extractContactId above: the exact key name GHL sends depends on what the
+// Webhook action's Custom Data section is configured with, which is
+// unverified until the workflow side is actually wired up (see the Webhook
+// action setup note above handleCallOutcomeWebhook). Tries every plausible
+// name for the duration merge field rather than guessing one.
+function extractCallDurationSeconds(body) {
+  const raw =
+    body?.duration ??
+    body?.call_duration ??
+    body?.callDuration ??
+    body?.phone_call_duration ??
+    body?.customData?.duration ??
+    body?.customData?.call_duration ??
+    null;
+  if (raw === null || raw === undefined || raw === "") return null;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : null;
+}
+
+// ADDED 2026-09-08 (task #187). Fires once per Dakota call attempt (both
+// answered and no-answer outcomes route through here) — see the Webhook
+// action setup note near CALL_ANSWERED_DURATION_THRESHOLD_SECONDS above for
+// the GHL-side wiring this expects: a "Webhook" action added immediately
+// after each "Voice AI outbound call" (Dakota) step in the
+// "0. New Construction - New Lead Calls" workflow, POSTing to
+// /call-outcome-webhook?token=... with Custom Data containing at minimum
+// the contact id and the Phone Call Duration merge field.
+async function handleCallOutcomeWebhook(body) {
+  const contactId = extractContactId(body);
+  if (!contactId) {
+    console.error("call-outcome webhook: no contact id found in body:", JSON.stringify(body));
+    return { ok: false, reason: "no contact id in payload", raw_body_logged: true };
+  }
+
+  const durationSeconds = extractCallDurationSeconds(body);
+  if (durationSeconds === null) {
+    console.error("call-outcome webhook: no duration found in body:", JSON.stringify(body));
+    return { ok: false, reason: "no call duration in payload — check the Webhook action's Custom Data fields", contact_id: contactId };
+  }
+
+  const data = await ghlFetch(`/contacts/${contactId}`);
+  const raw = data.contact || data;
+  const name =
+    `${raw.firstName || ""} ${raw.lastName || ""}`.trim() || raw.contactName || raw.name || "";
+  const firstName = firstNameOf(name);
+  const tags = (raw.tags || []).map((t) => String(t).toLowerCase());
+
+  // Same consent/suppression gate as the lead webhook above — server.js's
+  // ghlSendSms comment is explicit that nothing may text a contact without
+  // this check, and it is NOT re-verified inside sendSms() itself.
+  const consentOnFile = ghlConsentValue(raw);
+  const phoneOutreachOk = Boolean(raw.phone && consentOnFile);
+  const stoppedInGhl = tags.some((t) => /unsubscribed|opt[- ]?out|replied\s*"?stop"?/i.test(t));
+  const suppressed = Boolean(raw.dnd) || stoppedInGhl;
+
+  const answered = durationSeconds >= CALL_ANSWERED_DURATION_THRESHOLD_SECONDS;
+  const disposition = answered ? "answered" : "no_answer";
+  const dedupeTag = answered ? CALL_THANKYOU_TEXT_SENT_TAG : NO_ANSWER_TEXT_SENT_TAG;
+  const alreadySent = tags.includes(dedupeTag);
+
+  if (!phoneOutreachOk || suppressed || alreadySent) {
+    return {
+      ok: true,
+      skipped: true,
+      reason: !phoneOutreachOk
+        ? "phone_outreach_ok is false (no consent on file or no phone)"
+        : suppressed
+        ? "suppressed (GHL dnd flag or STOP tag)"
+        : `already sent (${dedupeTag} tag present) — idempotency guard, one ${disposition} text per contact`,
+      contact_id: contactId,
+      name,
+      duration_seconds: durationSeconds,
+      disposition,
+    };
+  }
+
+  const smsText = renderTemplate(CALL_OUTCOME_SMS[disposition], firstName);
+  let smsSent = false;
+  let smsError = null;
+  try {
+    await sendSms(contactId, smsText);
+    smsSent = true;
+    await addTags(contactId, [dedupeTag]);
+  } catch (err) {
+    smsError = err.message;
+    console.error(`Failed to send ${disposition} SMS to contact ${contactId}:`, err.message);
+  }
+
+  return {
+    ok: true,
+    skipped: false,
+    contact_id: contactId,
+    name,
+    duration_seconds: durationSeconds,
+    disposition,
+    sms_sent: smsSent,
+    sms_error: smsError,
+    sms_text: smsText,
+  };
+}
+
 async function addTags(contactId, tags) {
   await ghlFetch(`/contacts/${contactId}/tags`, {
     method: "POST",
@@ -732,7 +880,10 @@ async function handleLeadWebhook(body) {
 const server = http.createServer((req, res) => {
   if (req.method === "GET" && req.url === "/") {
     res.writeHead(200, { "Content-Type": "text/plain" });
-    return res.end("GR Group instant lead webhook receiver — POST /lead-webhook?token=... to use.");
+    return res.end(
+      "GR Group instant lead webhook receiver — POST /lead-webhook?token=... for new leads, " +
+        "POST /call-outcome-webhook?token=... for post-Dakota-call outcome texts."
+    );
   }
 
   if (req.method === "POST" && req.url.startsWith("/lead-webhook")) {
@@ -762,6 +913,44 @@ const server = http.createServer((req, res) => {
       } catch (err) {
         console.error("Webhook handling error:", err.message);
         res.writeHead(200, { "Content-Type": "application/json" }); // 200 so GHL doesn't retry-storm
+        res.end(JSON.stringify({ ok: false, error: err.message }));
+      }
+    });
+    return;
+  }
+
+  // ADDED 2026-09-08 (task #187) — see handleCallOutcomeWebhook above for
+  // what this expects GHL to POST and why. Mirrors the /lead-webhook route
+  // exactly (token check, buffered body, 200-even-on-error so GHL doesn't
+  // retry-storm) — deliberately not deduplicated into a shared helper so
+  // the two webhook flows stay independently readable and editable.
+  if (req.method === "POST" && req.url.startsWith("/call-outcome-webhook")) {
+    const token = new URL(req.url, `http://${req.headers.host}`).searchParams.get("token");
+    if (!WEBHOOK_TOKEN || token !== WEBHOOK_TOKEN) {
+      res.writeHead(401, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify({ ok: false, error: "missing or wrong token" }));
+    }
+
+    let bodyStr = "";
+    req.on("data", (chunk) => {
+      bodyStr += chunk;
+      if (bodyStr.length > 2e5) req.destroy();
+    });
+    req.on("end", async () => {
+      let body = {};
+      try {
+        body = JSON.parse(bodyStr || "{}");
+      } catch {
+        console.error("Non-JSON call-outcome webhook body received:", bodyStr);
+      }
+      console.error("Call-outcome webhook received:", JSON.stringify(body));
+      try {
+        const result = await handleCallOutcomeWebhook(body);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(result));
+      } catch (err) {
+        console.error("Call-outcome webhook handling error:", err.message);
+        res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: false, error: err.message }));
       }
     });
