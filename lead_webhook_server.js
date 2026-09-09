@@ -227,9 +227,13 @@ const CALL_ANSWERED_DURATION_THRESHOLD_SECONDS = 45;
 const NO_ANSWER_TEXT_SENT_TAG = "dakota-no-answer-text-sent";
 const CALL_THANKYOU_TEXT_SENT_TAG = "dakota-call-thankyou-text-sent";
 
+// Wording updated 2026-09-08 (task #187 follow-up, per Gus's request) to
+// match Dakota's repositioning (task #169/#182) away from
+// new-construction-only framing to a general home-buying agent — the
+// no_answer text no longer name-drops "new construction homes".
 const CALL_OUTCOME_SMS = {
   no_answer:
-    "Hi {{FIRST_NAME}}, this is Dakota with GR Group — sorry I missed you! Happy to help with new construction homes in the Coachella Valley whenever works. Call or text me back anytime, or browse what's available now: {{HOME_SEARCH_URL}}",
+    "Hi {{FIRST_NAME}}, this is Dakota with GR Group — sorry I missed you! Happy to help with your home search in the Coachella Valley whenever works for you. Call or text me back anytime, or browse what's available now: {{HOME_SEARCH_URL}}",
   answered:
     "Hi {{FIRST_NAME}}, thanks for taking my call just now! This is Dakota with GR Group. If anything comes to mind after we talked, just reply here — happy to help.",
 };
