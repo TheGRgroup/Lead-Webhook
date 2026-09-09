@@ -527,6 +527,7 @@ function extractContactId(body) {
     body?.id ||
     body?.contact?.id ||
     body?.customData?.contact_id ||
+    body?.customData?.contactId ||
     null
   );
 }
