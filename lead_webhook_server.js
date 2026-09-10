@@ -232,11 +232,24 @@ const CALL_THANKYOU_TEXT_SENT_TAG = "dakota-call-thankyou-text-sent";
 // new-construction-only framing to a general home-buying agent — the
 // no_answer text no longer name-drops "new construction homes".
 const CALL_OUTCOME_SMS = {
-  no_answer:
-    "Hi {{FIRST_NAME}}, this is Dakota with GR Group — sorry I missed you! Happy to help with your home search in the Coachella Valley whenever works for you. Call or text me back anytime, or browse what's available now: {{HOME_SEARCH_URL}}",
-  answered:
-    "Hi {{FIRST_NAME}}, thanks for taking my call just now! This is Dakota with GR Group. If anything comes to mind after we talked, just reply here — happy to help.",
+    no_answer: [
+          "Hi {{FIRST_NAME}}, this is Dakota with GR Group -- sorry I missed you! Happy to help with your home search in the Coachella Valley whenever works for you. Call or text me back anytime, or browse what's available now: {{HOME_SEARCH_URL}}",
+          "Hi {{FIRST_NAME}}, Dakota here from GR Group -- just tried calling! No worries if now's not a good time. Whenever you're ready, I'm happy to help with your home search: {{HOME_SEARCH_URL}} -- or just text me back.",
+          "Hi {{FIRST_NAME}}, this is Dakota with GR Group, sorry we missed each other on the phone. Take a look at what's out there when you get a chance: {{HOME_SEARCH_URL}} -- reply anytime and I'll help however I can.",
+          "Hey {{FIRST_NAME}}, it's Dakota from GR Group -- tried reaching you just now. No rush at all, just wanted to say I'm here whenever you want to talk homes. Browse current options here: {{HOME_SEARCH_URL}}",
+        ],
+    answered: [
+          "Hi {{FIRST_NAME}}, thanks for taking my call just now! This is Dakota with GR Group. If anything comes to mind after we talked, just reply here -- happy to help.",
+          "Hi {{FIRST_NAME}}, this is Dakota with GR Group -- really appreciated the chat just now. Reach out anytime if something comes up, I'm just a text away.",
+          "Hey {{FIRST_NAME}}, Dakota here from GR Group. Thanks for the time on the phone! Feel free to reply here with any questions as things come up.",
+          "Hi {{FIRST_NAME}}, thanks again for chatting with me -- Dakota with GR Group. Don't hesitate to text if anything else comes to mind.",
+        ],
 };
+
+function pickSmsVariant(disposition) {
+    const variants = CALL_OUTCOME_SMS[disposition];
+    return variants[Math.floor(Math.random() * variants.length)];
+}
 
 // Duplicated from server.js SEQUENCES[tier][0] — see the file header note.
 const TOUCH_ONE = {
@@ -612,7 +625,7 @@ async function handleCallOutcomeWebhook(body) {
     };
   }
 
-  const smsText = renderTemplate(CALL_OUTCOME_SMS[disposition], firstName);
+  const smsText = renderTemplate(pickSmsVariant(disposition), firstName);
   let smsSent = false;
   let smsError = null;
   try {
