@@ -567,11 +567,14 @@ async function handleCallOutcomeWebhook(body) {
     return { ok: false, reason: "no contact id in payload", raw_body_logged: true };
   }
 
-  const durationSeconds = extractCallDurationSeconds(body);
-  if (durationSeconds === null) {
-    console.error("call-outcome webhook: no duration found in body:", JSON.stringify(body));
-    return { ok: false, reason: "no call duration in payload — check the Webhook action's Custom Data fields", contact_id: contactId };
-  }
+// FIXED 2026-09-09 (task #189, confirmed via live call log): GHL sends an
+    // empty string for the Phone Call Duration merge field when the call never
+    // connected (no answer) rather than "0" -- treating that as "missing data"
+    // and aborting meant the no-answer text could never fire, which was the
+    // actual reason texts weren't sending on real calls. Empty/missing duration
+    // is now treated as 0 seconds (no_answer), matching what it really means.
+    const extractedDuration = extractCallDurationSeconds(body);
+    const durationSeconds = extractedDuration === null ? 0 : extractedDuration;
 
   const data = await ghlFetch(`/contacts/${contactId}`);
   const raw = data.contact || data;
