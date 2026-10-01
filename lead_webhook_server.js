@@ -231,24 +231,33 @@ const CALL_THANKYOU_TEXT_SENT_TAG = "dakota-call-thankyou-text-sent";
 // match Dakota's repositioning (task #169/#182) away from
 // new-construction-only framing to a general home-buying agent — the
 // no_answer text no longer name-drops "new construction homes".
+//
+// UPDATED 2026-09-10 (task #194, per Gus's request): each disposition is now
+// a list of variants instead of one fixed string. Only one text ever goes
+// out per contact (see the dedupe tags above), but across HUNDREDS of
+// contacts a single hardcoded sentence reads as an obvious mail-merge blast.
+// pickSmsVariant() below picks one at random per send so the wording varies
+// contact-to-contact while every variant stays factually identical (same
+// name, same agent, same offer) — no variant promises anything the others
+// don't.
 const CALL_OUTCOME_SMS = {
-    no_answer: [
-          "Hi {{FIRST_NAME}}, this is Dakota with GR Group -- sorry I missed you! Happy to help with your home search in the Coachella Valley whenever works for you. Call or text me back anytime, or browse what's available now: {{HOME_SEARCH_URL}}",
-          "Hi {{FIRST_NAME}}, Dakota here from GR Group -- just tried calling! No worries if now's not a good time. Whenever you're ready, I'm happy to help with your home search: {{HOME_SEARCH_URL}} -- or just text me back.",
-          "Hi {{FIRST_NAME}}, this is Dakota with GR Group, sorry we missed each other on the phone. Take a look at what's out there when you get a chance: {{HOME_SEARCH_URL}} -- reply anytime and I'll help however I can.",
-          "Hey {{FIRST_NAME}}, it's Dakota from GR Group -- tried reaching you just now. No rush at all, just wanted to say I'm here whenever you want to talk homes. Browse current options here: {{HOME_SEARCH_URL}}",
-        ],
-    answered: [
-          "Hi {{FIRST_NAME}}, thanks for taking my call just now! This is Dakota with GR Group. If anything comes to mind after we talked, just reply here -- happy to help.",
-          "Hi {{FIRST_NAME}}, this is Dakota with GR Group -- really appreciated the chat just now. Reach out anytime if something comes up, I'm just a text away.",
-          "Hey {{FIRST_NAME}}, Dakota here from GR Group. Thanks for the time on the phone! Feel free to reply here with any questions as things come up.",
-          "Hi {{FIRST_NAME}}, thanks again for chatting with me -- Dakota with GR Group. Don't hesitate to text if anything else comes to mind.",
-        ],
+  no_answer: [
+    "Hi {{FIRST_NAME}}, this is Dakota with GR Group — sorry I missed you! Happy to help with your home search in the Coachella Valley whenever works for you. Call or text me back anytime, or browse what's available now: {{HOME_SEARCH_URL}}",
+    "Hi {{FIRST_NAME}}, Dakota here from GR Group — just tried calling! No worries if now's not a good time. Whenever you're ready, I'm happy to help with your home search: {{HOME_SEARCH_URL}} — or just text me back.",
+    "Hi {{FIRST_NAME}}, this is Dakota with GR Group, sorry we missed each other on the phone. Take a look at what's out there when you get a chance: {{HOME_SEARCH_URL}} — reply anytime and I'll help however I can.",
+    "Hey {{FIRST_NAME}}, it's Dakota from GR Group — tried reaching you just now. No rush at all, just wanted to say I'm here whenever you want to talk homes. Browse current options here: {{HOME_SEARCH_URL}}",
+  ],
+  answered: [
+    "Hi {{FIRST_NAME}}, thanks for taking my call just now! This is Dakota with GR Group. If anything comes to mind after we talked, just reply here — happy to help.",
+    "Hi {{FIRST_NAME}}, this is Dakota with GR Group — really appreciated the chat just now. Reach out anytime if something comes up, I'm just a text away.",
+    "Hey {{FIRST_NAME}}, Dakota here from GR Group. Thanks for the time on the phone! Feel free to reply here with any questions as things come up.",
+    "Hi {{FIRST_NAME}}, thanks again for chatting with me — Dakota with GR Group. Don't hesitate to text if anything else comes to mind.",
+  ],
 };
 
 function pickSmsVariant(disposition) {
-    const variants = CALL_OUTCOME_SMS[disposition];
-    return variants[Math.floor(Math.random() * variants.length)];
+  const variants = CALL_OUTCOME_SMS[disposition];
+  return variants[Math.floor(Math.random() * variants.length)];
 }
 
 // Duplicated from server.js SEQUENCES[tier][0] — see the file header note.
@@ -580,14 +589,14 @@ async function handleCallOutcomeWebhook(body) {
     return { ok: false, reason: "no contact id in payload", raw_body_logged: true };
   }
 
-// FIXED 2026-09-09 (task #189, confirmed via live call log): GHL sends an
-    // empty string for the Phone Call Duration merge field when the call never
-    // connected (no answer) rather than "0" -- treating that as "missing data"
-    // and aborting meant the no-answer text could never fire, which was the
-    // actual reason texts weren't sending on real calls. Empty/missing duration
-    // is now treated as 0 seconds (no_answer), matching what it really means.
-    const extractedDuration = extractCallDurationSeconds(body);
-    const durationSeconds = extractedDuration === null ? 0 : extractedDuration;
+  // FIXED 2026-09-09 (task #189, confirmed via live call log): GHL sends an
+  // empty string for the Phone Call Duration merge field when the call never
+  // connected (no answer) rather than "0" — treating that as "missing data"
+  // and aborting meant the no-answer text could never fire, which was the
+  // actual reason texts weren't sending on real calls. Empty/missing duration
+  // is now treated as 0 seconds (no_answer), matching what it really means.
+  const extractedDuration = extractCallDurationSeconds(body);
+  const durationSeconds = extractedDuration === null ? 0 : extractedDuration;
 
   const data = await ghlFetch(`/contacts/${contactId}`);
   const raw = data.contact || data;
@@ -679,12 +688,114 @@ async function sendSms(contactId, message) {
 // deliberately isolated (own try/catch at the call site): a failure here
 // must never affect the lead-facing email/BoldTrail-push work above it,
 // which is the actually load-bearing part of this handler.
-async function notifyGusHotLead(name, phone) {
+// WIDENED 2026-09-29 (task #227, Gus's explicit call: "warm and hot, cold
+// gets nurtured by dakota") — was hot-tier only. Renamed from
+// notifyGusHotLead to notifyGusNewLead and takes tier so the wording matches
+// what actually happened; cold leads intentionally still get no SMS to Gus,
+// they just flow into the Dakota cadence + email nurture silently.
+async function notifyGusNewLead(name, phone, tier) {
   const who = name || "Unknown name";
   const ph = phone || "no phone on file";
-  const message = `CALL NOW - ${who}, ${ph}, hot lead. Instant email sent, BoldTrail texting them now too.`;
+  const urgency = tier === "hot" ? "CALL NOW" : "NEW WARM LEAD";
+  const message = `${urgency} - ${who}, ${ph}, ${tier} lead. Instant email sent, BoldTrail texting them now too.`;
   return sendSms(GUS_CONTACT_ID, message);
 }
+
+// ─── 1hr no-response escalation backstop (task #227, "wait 1hr and escalate
+// if no call/reply logged") ────────────────────────────────────────────────
+// ADDED 2026-09-29. Nothing anywhere in this project previously implemented
+// this — confirmed by reading server.js's sequence engine (a step===0 signal
+// was carried specifically for "the tightened alerting backstop task" to
+// consume, but nothing ever read it) and this file (handleLeadWebhook only
+// ever fires once, at submit time). Deliberately built as a poller INSIDE
+// this same always-on Render service, not a Cowork scheduled task — the
+// entire point of this file (see header) is working with Gus's laptop
+// closed, and a Cowork-side poller would reintroduce exactly that gap for
+// this one piece.
+//
+// ghlContactHasFollowup mirrors server.js's helper of the same name
+// (independent copy on purpose — this file has zero runtime dependency on
+// server.js or Claude being open). GHL v2 has no documented "list notes"
+// endpoint verified live, so on any error this returns null (unknown) and
+// checkNoResponseEscalations below treats null as "don't alert" — never
+// want an API hiccup to read to Gus as "nobody followed up."
+async function ghlContactHasFollowup(contactId) {
+  try {
+    const data = await ghlFetch(`/contacts/${contactId}/notes`);
+    const notes = data.notes || data.data || [];
+    return Array.isArray(notes) ? notes.length > 0 : null;
+  } catch {
+    return null;
+  }
+}
+
+const ESCALATED_NO_RESPONSE_TAG = "escalated-no-response";
+const ESCALATION_WINDOW_MIN_MS = 60 * 60 * 1000; // 1hr — spec's own threshold
+// Upper bound so this job never resurfaces an old lead forever if it's ever
+// down for a stretch (Render restart, etc.) — after 2hr, a gap here should
+// surface some other way (e.g. #207's stale-lead sweep), not as a fresh
+// "just missed by an hour" ping that would be misleading days later.
+const ESCALATION_WINDOW_MAX_MS = 2 * 60 * 60 * 1000;
+
+async function checkNoResponseEscalations() {
+  if (!GUS_NOTIFY_ENABLED) return;
+  try {
+    const qs = new URLSearchParams();
+    qs.set("locationId", process.env.GHL_LOCATION_ID || "");
+    qs.set("limit", "100");
+    const data = await ghlFetch(`/contacts/?${qs}`);
+    const rows = data.contacts || [];
+    const now = Date.now();
+
+    for (const raw of rows) {
+      const tags = (raw.tags || []).map((t) => String(t).toLowerCase());
+      // Only ever look at leads this same webhook already instant-touched —
+      // never a random contact that happens to be old, and never a contact
+      // this job has already checked once (single pass per lead, not a
+      // recurring nag every 15 minutes for two hours straight).
+      if (!tags.includes(INSTANT_TOUCH_TAG)) continue;
+      if (tags.includes(ESCALATED_NO_RESPONSE_TAG)) continue;
+
+      const addedMs = raw.dateAdded ? new Date(raw.dateAdded).getTime() : NaN;
+      if (!Number.isFinite(addedMs)) continue;
+      const age = now - addedMs;
+      if (age < ESCALATION_WINDOW_MIN_MS || age > ESCALATION_WINDOW_MAX_MS) continue;
+
+      // Same suppression checks as handleLeadWebhook — never chase someone
+      // who explicitly opted out or declined, even if they never got a
+      // logged follow-up.
+      if (ghlExplicitlyDeclinedContact(raw)) continue;
+      const stoppedInGhl = tags.some((t) => /unsubscribed|opt[- ]?out|replied\s*"?stop"?/i.test(t));
+      if (Boolean(raw.dnd) || stoppedInGhl) continue;
+
+      const hasFollowup = await ghlContactHasFollowup(raw.id);
+      if (hasFollowup === false) {
+        const name = `${raw.firstName || ""} ${raw.lastName || ""}`.trim() || raw.contactName || raw.name || "";
+        try {
+          await sendSms(
+            GUS_CONTACT_ID,
+            `NO RESPONSE 1HR - ${name || "Unknown"}, ${raw.phone || "no phone on file"} - no call/note logged yet since the instant touch. Dakota cadence still running, might be worth a personal check.`
+          );
+        } catch (err) {
+          console.error(`Failed to send no-response escalation SMS for ${raw.id}:`, err.message);
+        }
+      }
+      // Tag regardless of outcome (true / false / null-unknown) so this
+      // contact is never re-evaluated by this job again.
+      await addTags(raw.id, [ESCALATED_NO_RESPONSE_TAG]).catch((err) =>
+        console.error(`Failed to tag ${raw.id} as escalation-checked:`, err.message)
+      );
+    }
+  } catch (err) {
+    console.error("checkNoResponseEscalations run failed:", err.message);
+  }
+}
+
+// Poll every 15 minutes — frequent enough that a lead entering the 1hr mark
+// still gets caught well before the 2hr window closes.
+setInterval(() => {
+  checkNoResponseEscalations().catch((err) => console.error("Escalation poll error:", err.message));
+}, 15 * 60 * 1000);
 
 async function handleLeadWebhook(body) {
   const contactId = extractContactId(body);
@@ -865,9 +976,9 @@ async function handleLeadWebhook(body) {
 
   let gusNotified = false;
   let gusNotifyError = null;
-  if (GUS_NOTIFY_ENABLED && tier === "hot") {
+  if (GUS_NOTIFY_ENABLED && (tier === "hot" || tier === "warm")) {
     try {
-      await notifyGusHotLead(name, raw.phone);
+      await notifyGusNewLead(name, raw.phone, tier);
       gusNotified = true;
     } catch (err) {
       gusNotifyError = err.message;
